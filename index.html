@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="manifest" href="manifest.json">
+  <title>Drill Caller</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    h1 {
+      margin-bottom: 10px;
+      text-align: center;
+    }
+    #display {
+      font-size: 3rem;
+      margin: 20px 0;
+      padding: 20px;
+      min-width: 220px;
+      text-align: center;
+      border-radius: 12px;
+      background: #222;
+      border: 2px solid #444;
+    }
+    .controls {
+      width: 100%;
+      max-width: 400px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    label {
+      font-size: 0.9rem;
+    }
+    input, select {
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid #555;
+      background: #1b1b1b;
+      color: #eee;
+    }
+    button {
+      padding: 10px;
+      border-radius: 8px;
+      border: none;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #startBtn {
+      background: #2ecc71;
+      color: #000;
+    }
+    #stopBtn {
+      background: #e74c3c;
+      color: #fff;
+    }
+    #fullscreenBtn {
+      background: #470940;
+      color: #fff;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .row > * {
+      flex: 1;
+    }
+  .fullscreen-active #display {
+  font-size: 6rem;
+  padding: 40px;
+}
+
+.fullscreen-active .controls {
+  display: none;
+}
+
+.fullscreen-active body {
+  background: #000;
+}
+
+  </style>
+</head>
+<body>
+  <h1>Drill Caller</h1>
+
+  <div id="display">Ready</div>
+
+  <div class="controls">
+    <div>
+      <label for="duration">Duration (seconds)</label>
+      <input id="duration" type="number" min="5" value="30">
+    </div>
+
+    <div>
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option>Color</option>
+        <option>Direction</option>
+        <option>Hybrid</option>
+        <option>Hybrid Weighted</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>
+        <input id="drillMode" type="checkbox">
+        Drill mode (speeds up)
+      </label>
+    </div>
+
+    <div class="row">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn">Stop</button>
+      <button id="fullscreenBtn">Full Screen</button>
+
+    </div>
+  </div>
+
+  <script>
+    // --- Data pools ---
+    const colors = ["red", "blue", "green", "yellow"];
+    const directions = ["left", "right", "forward", "back"];
+
+    // --- DOM elements ---
+    const displayEl = document.getElementById("display");
+    const durationEl = document.getElementById("duration");
+    const modeEl = document.getElementById("mode");
+    const drillModeEl = document.getElementById("drillMode");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+
+    // --- State ---
+    let running = false;
+    let startTime = 0;
+    let durationMs = 0;
+    let drillMode = false;
+    let currentMode = "Color";
+    let poolSource = [];
+    let pool = [];
+    let metronomeInterval = null;
+
+    // --- Speech helper ---
+    function speak(text) {
+      if (!("speechSynthesis" in window)) {
+        console.log("Speak:", text);
+        return;
+      }
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 1.0;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utter);
+    }
+
+    // --- Metronome (80 BPM) ---
+    function startMetronome() {
+      stopMetronome();
+      const bpm = 80;
+      const interval = 60000 / bpm; // ms
+      metronomeInterval = setInterval(() => {
+        // Simple click using short beep via Web Audio
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.frequency.value = 1000;
+          gain.gain.setValueAtTime(0.2, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.05);
+        } catch (e) {
+          // Fallback: no sound
+        }
+      }, interval);
+    }
+
+    function stopMetronome() {
+      if (metronomeInterval !== null) {
+        clearInterval(metronomeInterval);
+        metronomeInterval = null;
+      }
+    }
+
+    // --- Pool setup ---
+    function setupPool() {
+      if (currentMode === "Color") {
+        poolSource = [...colors];
+      } else if (currentMode === "Direction") {
+        poolSource = [...directions];
+      } else if (currentMode === "Hybrid") {
+        poolSource = [...colors, ...directions];
+      } else if (currentMode === "Hybrid Weighted") {
+        // 70% directions, 30% colors
+        poolSource = [
+          ...Array(7).fill(null).flatMap(() => directions),
+          ...Array(3).fill(null).flatMap(() => colors)
+        ];
+      } else {
+        poolSource = [...colors];
+      }
+      pool = shuffle([...poolSource]);
+    }
+
+    function shuffle(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    }
+
+    // --- Drill loop ---
+    function nextCall() {
+      if (!running) return;
+
+      const now = performance.now();
+      const elapsed = now - startTime;
+      if (elapsed >= durationMs) {
+        stopDrill();
+        return;
+      }
+
+      if (pool.length === 0) {
+        pool = shuffle([...poolSource]);
+      }
+      const item = pool.pop();
+
+      // Visual
+      displayEl.textContent = item;
+      // Background hint for colors
+      if (colors.includes(item)) {
+        displayEl.style.background = item;
+        displayEl.style.color = (item === "yellow") ? "#000" : "#fff";
+      } else {
+        displayEl.style.background = "#222";
+        displayEl.style.color = "#fff";
+      }
+
+      // Audio
+      speak(item);
+
+      // Delay
+      let delayMs;
+      if (drillMode) {
+        const progress = Math.min(elapsed / durationMs, 1);
+        const startDelay = 1500;
+        const endDelay = 500;
+        const currentDelay = startDelay - progress * (startDelay - endDelay);
+        delayMs = currentDelay;
+      } else {
+        delayMs = 1500;
+      }
+
+      setTimeout(nextCall, delayMs);
+    }
+
+    function startDrill() {
+      if (running) return;
+      const dur = parseInt(durationEl.value, 10);
+      if (isNaN(dur) || dur <= 0) return;
+
+      running = true;
+      durationMs = dur * 1000;
+      drillMode = drillModeEl.checked;
+      currentMode = modeEl.value;
+      startTime = performance.now();
+
+      setupPool();
+      startMetronome();
+      nextCall();
+    }
+
+    function stopDrill() {
+      running = false;
+      stopMetronome();
+      displayEl.textContent = "Done";
+      displayEl.style.background = "#222";
+      displayEl.style.color = "#eee";
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    }
+
+    // --- Event wiring ---
+    startBtn.addEventListener("click", () => {
+      displayEl.textContent = "Get Ready...";
+      displayEl.style.background = "#222";
+      displayEl.style.color = "#eee";
+      setTimeout(startDrill, 500);
+    });
+
+    stopBtn.addEventListener("click", stopDrill);
+    // --- Full-Screen ---
+    const fullscreenBtn = document.getElementById("fullscreenBtn");
+
+  function enterFullscreen() {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen();
+      document.body.classList.add("fullscreen-active");
+    }
+
+  function exitFullscreen() {
+    if (document.exitFullscreen) document.exitFullscreen();
+      document.body.classList.remove("fullscreen-active");
+    }
+
+  let uiHidden = false;
+
+  function toggleUI() {
+    uiHidden = !uiHidden;
+    if (uiHidden) {
+      enterFullscreen();
+      } else {
+      exitFullscreen();
+      }
+    }
+
+  fullscreenBtn.addEventListener("click", toggleUI);
+
+// Allow tapping the display to toggle UI
+  displayEl.addEventListener("click", toggleUI);
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('service-worker.js');
+}
+
+  </script>
+</body>
+</html>
